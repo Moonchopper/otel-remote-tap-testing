@@ -11,7 +11,8 @@ docker compose up --abort-on-container-exit --exit-code-from driver; docker comp
 VERSION=0.150.0 docker compose up --abort-on-container-exit --exit-code-from driver; docker compose down
 ```
 
-Always run `down` between runs: a stalled collector stays stalled. Inside the compose network step 3 stalls after a
+To watch batches leave the collector through its debug exporter, run `docker compose logs -f collector` in another
+terminal. Always run `down` between runs: a stalled collector stays stalled. Inside the compose network step 3 stalls after a
 couple of requests rather than ~47 (smaller socket buffers); the rest of the output matches.
 
 By hand, one step at a time: see [MANUAL.md](MANUAL.md).

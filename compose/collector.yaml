@@ -1,4 +1,5 @@
-# A throwaway collector: OTLP/HTTP in, the remote tap, records dropped by a nop exporter.
+# A throwaway collector: OTLP/HTTP in, the remote tap, and a debug exporter that logs each batch as it
+# leaves. Watch it: `docker compose logs -f collector` (Compose) or terminal 1 (MANUAL.md).
 # health_check tells the driver it's up; pprof lets the driver take a goroutine dump at the end.
 extensions:
   health_check: { endpoint: 0.0.0.0:13133 }
@@ -10,9 +11,13 @@ receivers:
 processors:
   remotetap: { endpoint: 0.0.0.0:12001, limit: 50 }
 exporters:
-  nop: {}
+  # basic: one line per batch. normal: one line per record (with sendlogs.sh's 200 KB bodies, very long lines).
+  # detailed: every field.
+  debug: { verbosity: basic }
 service:
   extensions: [health_check, pprof]
-  telemetry: { metrics: { level: none } }
+  telemetry:
+    metrics: { level: none }
+    logs: { sampling: { enabled: false } } # the collector's own logs sample by default, which hides most debug lines
   pipelines:
-    logs: { receivers: [otlp], processors: [remotetap], exporters: [nop] }
+    logs: { receivers: [otlp], processors: [remotetap], exporters: [debug] }

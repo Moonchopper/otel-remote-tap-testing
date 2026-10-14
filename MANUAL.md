@@ -15,6 +15,10 @@ docker run --rm --name taplab -p 4318:4318 -p 12001:12001 -p 1777:1777 \
 
 That gives OTLP/HTTP on :4318, the remote tap on :12001 and pprof on :1777. Stop it with Ctrl-C.
 
+This terminal also shows what leaves the collector: the debug exporter logs one `info Logs {... "log records": 1}`
+line per batch it exports. When the pipeline stalls, those lines stop. For each record's body, set
+`verbosity: normal` in `compose/collector.yaml` (the bodies from `sendlogs.sh` are 200 KB, so the lines are long).
+
 ## 2. Watch the tap (terminal 2)
 
 ```bash
