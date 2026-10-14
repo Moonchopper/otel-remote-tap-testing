@@ -1,0 +1,18 @@
+# A throwaway collector: OTLP/HTTP in, the remote tap, records dropped by a nop exporter.
+# health_check tells the driver it's up; pprof lets the driver take a goroutine dump at the end.
+extensions:
+  health_check: { endpoint: 0.0.0.0:13133 }
+  pprof: { endpoint: 0.0.0.0:1777 }
+receivers:
+  otlp:
+    protocols:
+      http: { endpoint: 0.0.0.0:4318 }
+processors:
+  remotetap: { endpoint: 0.0.0.0:12001, limit: 50 }
+exporters:
+  nop: {}
+service:
+  extensions: [health_check, pprof]
+  telemetry: { metrics: { level: none } }
+  pipelines:
+    logs: { receivers: [otlp], processors: [remotetap], exporters: [nop] }
