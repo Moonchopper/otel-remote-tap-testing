@@ -1,0 +1,119 @@
+diff -ruN a/processor/remotetapprocessor/channelset.go b/processor/remotetapprocessor/channelset.go
+--- a/processor/remotetapprocessor/channelset.go	2026-10-15 02:30:57.048269255 +0000
++++ b/processor/remotetapprocessor/channelset.go	2026-10-15 02:30:57.060791639 +0000
+@@ -35,7 +35,12 @@
+ func (c *channelSet) writeBytes(bytes []byte) {
+ 	c.mu.RLock()
+ 	for _, ch := range c.chanmap {
+-		ch <- bytes
++		select {
++		case ch <- bytes:
++		default:
++			// This client is behind: drop its copy instead of waiting for it. Waiting here would hold
++			// up the pipeline, and would hold the read lock that closeAndRemove needs.
++		}
+ 	}
+ 	c.mu.RUnlock()
+ }
+diff -ruN a/processor/remotetapprocessor/channelset_test.go b/processor/remotetapprocessor/channelset_test.go
+--- a/processor/remotetapprocessor/channelset_test.go	2026-10-15 02:30:57.058343959 +0000
++++ b/processor/remotetapprocessor/channelset_test.go	2026-10-15 02:30:57.066004291 +0000
+@@ -12,7 +12,7 @@
+ 
+ func TestChannelset(t *testing.T) {
+ 	cs := newChannelSet()
+-	ch := make(chan []byte)
++	ch := make(chan []byte, 1) // client channels are buffered: writeBytes drops rather than waits
+ 	key := cs.add(ch)
+ 	go func() {
+ 		cs.writeBytes([]byte("hello"))
+@@ -22,3 +22,25 @@
+ 	}, time.Second, time.Millisecond*10)
+ 	cs.closeAndRemove(key)
+ }
++
++// A client that never reads must not block writeBytes, nor stop it from being removed.
++func TestChannelSetStuckClient(t *testing.T) {
++	cs := newChannelSet()
++	stuck := make(chan []byte, 1)
++	idx := cs.add(stuck)
++	done := make(chan struct{})
++	go func() {
++		for i := 0; i < 100; i++ {
++			cs.writeBytes([]byte("x"))
++		}
++		cs.closeAndRemove(idx)
++		cs.writeBytes([]byte("x"))
++		close(done)
++	}()
++	select {
++	case <-done:
++	case <-time.After(5 * time.Second):
++		t.Fatal("writeBytes or closeAndRemove blocked on a client that never reads")
++	}
++	assert.Len(t, cs.chanmap, 0)
++}
+diff -ruN a/processor/remotetapprocessor/processor.go b/processor/remotetapprocessor/processor.go
+--- a/processor/remotetapprocessor/processor.go	2026-10-15 02:30:57.050754743 +0000
++++ b/processor/remotetapprocessor/processor.go	2026-10-15 02:30:57.063521476 +0000
+@@ -66,15 +66,26 @@
+ 	return nil
+ }
+ 
++const (
++	clientBufferSize = 16
++	writeTimeout     = 10 * time.Second
++)
++
+ func (w *wsprocessor) handleConn(conn *websocket.Conn) {
+ 	err := conn.SetDeadline(time.Time{})
+ 	if err != nil {
+ 		w.telemetrySettings.Logger.Debug("Error setting deadline", zap.Error(err))
+ 		return
+ 	}
+-	ch := make(chan []byte)
++	// Buffered, so a client that is briefly slow loses nothing; one that stays behind loses messages
++	// (see writeBytes) rather than holding up the pipeline.
++	ch := make(chan []byte, clientBufferSize)
+ 	idx := w.cs.add(ch)
+ 	for bytes := range ch {
++		// A client that stops reading gets an error here instead of blocking this goroutine forever.
++		if err := conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
++			w.telemetrySettings.Logger.Debug("Error setting write deadline", zap.Error(err))
++		}
+ 		_, err := conn.Write(bytes)
+ 		if err != nil {
+ 			w.telemetrySettings.Logger.Debug("websocket write error: %w", zap.Error(err))
+diff -ruN a/processor/remotetapprocessor/processor_test.go b/processor/remotetapprocessor/processor_test.go
+--- a/processor/remotetapprocessor/processor_test.go	2026-10-15 02:30:57.055843649 +0000
++++ b/processor/remotetapprocessor/processor_test.go	2026-10-15 02:30:57.068162266 +0000
+@@ -43,7 +43,8 @@
+ 
+ 			processor := newProcessor(processortest.NewNopSettings(metadata.Type), conf)
+ 
+-			ch := make(chan []byte)
++			// Room for every message, so this tests the rate limit, not dropping for a slow client.
++			ch := make(chan []byte, c.limit*2+1)
+ 			idx := processor.cs.add(ch)
+ 			receiveNum := 0
+ 			wg := &sync.WaitGroup{}
+@@ -92,7 +93,8 @@
+ 
+ 			processor := newProcessor(processortest.NewNopSettings(metadata.Type), conf)
+ 
+-			ch := make(chan []byte)
++			// Room for every message, so this tests the rate limit, not dropping for a slow client.
++			ch := make(chan []byte, c.limit*2+1)
+ 			idx := processor.cs.add(ch)
+ 			receiveNum := 0
+ 			wg := &sync.WaitGroup{}
+@@ -143,7 +145,8 @@
+ 
+ 			processor := newProcessor(processortest.NewNopSettings(metadata.Type), conf)
+ 
+-			ch := make(chan []byte)
++			// Room for every message, so this tests the rate limit, not dropping for a slow client.
++			ch := make(chan []byte, c.limit*2+1)
+ 			idx := processor.cs.add(ch)
+ 			receiveNum := 0
+ 			wg := &sync.WaitGroup{}

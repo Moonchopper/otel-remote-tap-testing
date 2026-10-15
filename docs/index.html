@@ -114,6 +114,17 @@ footer { font-size: 13px; color: var(--muted); }
 .step pre .hl { background: color-mix(in srgb, var(--stall) 28%, transparent); display: inline-block; width: 100%; }
 .src { font-family: var(--f-mono); font-size: 12.5px; }
 .src a { color: inherit; }
+.step.good .n { background: var(--tap); color: #fff; }
+.step pre .add { background: color-mix(in srgb, var(--tap) 26%, transparent); display: inline-block; width: 100%; }
+.step pre .del { background: color-mix(in srgb, var(--stall) 22%, transparent); display: inline-block; width: 100%; text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--stall) 70%, transparent); }
+.why { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+.why .card p { margin: 0; color: var(--muted); }
+.result { width: 100%; border-collapse: collapse; font-size: 14px; }
+.result th, .result td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.result th { font-weight: 700; }
+.result td.bad { color: var(--stall); font-weight: 700; }
+.result td.ok { color: var(--tap); font-weight: 700; }
+.tablewrap { overflow-x: auto; }
 @media (prefers-reduced-motion: reduce) { .dim { transition: none; } }
 </style>
 </head>
@@ -255,7 +266,64 @@ Authorization: Bearer &lt;token&gt;
 }</pre>
       </div></div>
     </div>
-    <p style="margin:0;color:var(--muted);max-width:78ch">What a dump of a deadlocked collector looks like: several goroutines at <code>channelset.go:36</code> (new batches), a few at <code>:38</code> (batches holding the read lock), and one at <code>:46</code> (the disconnected client). A fix would give each client a buffered channel and send to it without waiting, dropping messages for a client that falls behind. That is what the relay does, one level up.</p>
+    <p style="margin:0;color:var(--muted);max-width:78ch">What a dump of a deadlocked collector looks like: several goroutines at <code>channelset.go:36</code> (new batches), a few at <code>:38</code> (batches holding the read lock), and one at <code>:46</code> (the disconnected client).</p>
+  </section>
+
+  <section style="display:grid;gap:18px" id="fix">
+    <h2>The fix, and why it works</h2>
+    <p style="margin:0;color:var(--muted);max-width:78ch">Three small changes, in the two places above. The idea is the one the relay already uses one level up: never let the pipeline wait on a reader. A reader that can't keep up loses its own copies; everyone else carries on.</p>
+    <div class="trace">
+      <div class="step good"><div class="n">A</div><div>
+        <h3>Hand off without waiting</h3>
+        <p>In <code>writeBytes</code>, send with <code>select</code> and a <code>default</code>. If the client's channel has room, it takes the message; if not, that client's copy is dropped and the loop moves on at once.</p>
+<pre>func (c *channelSet) writeBytes(bytes []byte) {
+	c.mu.RLock()
+	for _, ch := range c.chanmap {
+<span class="del">		ch &lt;- bytes</span>
+<span class="add">		select {
+		case ch &lt;- bytes:
+		default:
+			// This client is behind: drop its copy instead of waiting for it.
+		}</span>
+	}
+	c.mu.RUnlock()
+}</pre>
+      </div></div>
+      <div class="step good"><div class="n">B</div><div>
+        <h3>Give each client a small buffer</h3>
+        <p>With a non-waiting send, an unbuffered channel would drop a message whenever the client's goroutine is busy writing the previous one. A buffer of 16 absorbs normal jitter, so a healthy reader loses nothing.</p>
+<pre><span class="del">	ch := make(chan []byte)</span>
+<span class="add">	ch := make(chan []byte, clientBufferSize) // 16</span></pre>
+      </div></div>
+      <div class="step good"><div class="n">C</div><div>
+        <h3>Put a deadline on each write</h3>
+        <p>A reader that stops reading now gets a write error after 10 seconds instead of holding its goroutine, its socket and its buffers forever. The handler then removes it, the same way it handles a disconnect.</p>
+<pre>	for bytes := range ch {
+<span class="add">		if err := conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil { ... } // 10 s</span>
+		_, err := conn.Write(bytes)</pre>
+      </div></div>
+    </div>
+
+    <h3 style="margin:6px 0 0">Why each failure goes away</h3>
+    <div class="why">
+      <div class="card"><h3>The stall (step 3)</h3><p><code>writeBytes</code> never blocks, so <code>ConsumeLogs</code> returns as soon as the copies are queued or dropped. The pipeline no longer depends on how fast any reader reads.</p></div>
+      <div class="card"><h3>The deadlock (step 4)</h3><p>The read lock is now held only for a quick loop that can't block, so <code>closeAndRemove</code> always gets the write lock moments later. The cycle of lock ↔ channel waiting has no way to form.</p></div>
+      <div class="card"><h3>The stuck client itself</h3><p>The write deadline turns "silent forever" into an error, so a paused or vanished reader is removed and its resources freed, without waiting for TCP to give up.</p></div>
+      <div class="card"><h3>What it costs</h3><p>A reader that falls more than 16 messages behind misses messages. The tap is already a rate-limited sample, so that loses nothing anyone relied on.</p></div>
+    </div>
+
+    <h3 style="margin:6px 0 0">Tested against the same repro</h3>
+    <div class="tablewrap"><table class="result">
+      <thead><tr><th>Step</th><th>contrib 0.162.0</th><th>0.162.0 with the fix</th></tr></thead>
+      <tbody>
+        <tr><td>300 requests, one reader not reading</td><td class="bad">2 accepted, then no answers</td><td class="ok">300 of 300 accepted</td></tr>
+        <tr><td>20 s later, reader still connected</td><td class="bad">0 of 3</td><td class="ok">3 of 3</td></tr>
+        <tr><td>After the reader disconnects</td><td class="bad">0 of 3, stuck until restart</td><td class="ok">3 of 3</td></tr>
+        <tr><td>Goroutine dump</td><td class="bad">parked at channelset.go:36, 38, 46</td><td class="ok">nothing parked in remotetap</td></tr>
+        <tr><td>A healthy reader alongside the stuck one</td><td class="bad">starved with everyone else</td><td class="ok">keeps receiving (up to the tap's rate limit)</td></tr>
+      </tbody>
+    </table></div>
+    <p style="margin:0;color:var(--muted);max-width:78ch">The patch also adds a unit test that a never-read client can't block <code>writeBytes</code> or <code>closeAndRemove</code>; it fails on 0.162.0 and passes with the fix, and the processor's existing tests still pass.</p>
   </section>
 
   <section style="display:grid;gap:14px">

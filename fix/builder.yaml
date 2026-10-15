@@ -1,0 +1,16 @@
+# OpenTelemetry Collector Builder manifest; build.sh fills in @WORK@ and @V@.
+dist:
+  name: otelcol-tapfix
+  output_path: @WORK@/build
+receivers:
+  - gomod: go.opentelemetry.io/collector/receiver/otlpreceiver @V@
+processors:
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/remotetapprocessor @V@
+exporters:
+  - gomod: go.opentelemetry.io/collector/exporter/debugexporter @V@
+  - gomod: go.opentelemetry.io/collector/exporter/nopexporter @V@
+extensions:
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/healthcheckextension @V@
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/pprofextension @V@
+replaces:
+  - github.com/open-telemetry/opentelemetry-collector-contrib/processor/remotetapprocessor => @WORK@/processor/remotetapprocessor
