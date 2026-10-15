@@ -73,8 +73,20 @@ collector parks on exactly these lines.
    restart clears it.
    [channelset.go#L45-L50](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.162.0/processor/remotetapprocessor/channelset.go#L45-L50)
 
-A fix would give each client a buffered channel and send to it without waiting (`select` with a `default` that drops),
-plus a write deadline on the connection.
+## The fix
+
+[`fix/`](fix/) has a patch against v0.162.0 and a script that builds a collector with it. Three changes:
+
+- **`writeBytes` sends without waiting** (`select` with a `default` that drops). The pipeline never waits on a reader,
+  and the read lock is only held for a loop that can't block, so `closeAndRemove` always gets the write lock. That
+  removes both the stall and the deadlock.
+- **Each client's channel holds 16 messages**, so a healthy reader doesn't lose messages to ordinary jitter.
+- **Each write has a 10 s deadline**, so a reader that stops reading is removed instead of holding its goroutine
+  forever.
+
+The cost: a reader more than 16 messages behind misses messages, which is fine for a rate-limited sample. Against the
+same repro the patched collector accepted 300 of 300 requests with the stuck reader connected, and 3 of 3 after it
+left, with nothing parked in `remotetap`.
 
 ## The pattern, interactively
 
