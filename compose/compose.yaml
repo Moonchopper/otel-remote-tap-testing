@@ -1,0 +1,19 @@
+# One-command repro: a throwaway collector with the remotetap processor, and a driver that stalls it.
+#   docker compose up --abort-on-container-exit --exit-code-from driver; docker compose down
+# Another release: VERSION=0.150.0 docker compose up ... (always `down` between runs: a stalled collector stays stalled)
+# Nothing is published to the host, so it can't collide with a collector you already run.
+services:
+  collector:
+    image: otel/opentelemetry-collector-contrib:${VERSION:-0.162.0}
+    command: ["--config=/etc/otelcol-contrib/repro.yaml"]
+    volumes:
+      - ./collector.yaml:/etc/otelcol-contrib/repro.yaml:ro
+    attach: false # keep its logs out of the way; `docker compose logs collector` shows them
+  driver:
+    image: python:3.12-alpine
+    command: ["python", "-u", "/repro/driver.py"]
+    environment:
+      COLLECTOR: collector
+    volumes:
+      - ./driver.py:/repro/driver.py:ro
+    depends_on: [collector]

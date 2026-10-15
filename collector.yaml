@@ -1,0 +1,17 @@
+# A throwaway collector: OTLP/HTTP in, the remote tap, records written to a file and logged by
+# the debug exporter as they leave (`docker logs -f tapstall`).
+receivers:
+  otlp:
+    protocols:
+      http: { endpoint: 0.0.0.0:4318 }
+processors:
+  remotetap: { endpoint: 0.0.0.0:12001, limit: 50 }
+exporters:
+  file: { path: /tmp/out/records.jsonl }
+  debug: { verbosity: basic }
+service:
+  telemetry:
+    metrics: { level: none }
+    logs: { sampling: { enabled: false } } # the collector's own logs sample by default, which hides most debug lines
+  pipelines:
+    logs: { receivers: [otlp], processors: [remotetap], exporters: [file, debug] }
