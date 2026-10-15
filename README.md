@@ -50,3 +50,34 @@ Why: `channelSet.writeBytes` sends each message to every client over an unbuffer
 so it waits for each client's `conn.Write`. When the stalled client's write finally fails, its handler calls
 `closeAndRemove`, which needs the write lock that the waiting `writeBytes` calls hold. Nothing reads that client's
 channel any more, so neither side can move.
+
+## Where it happens in the code
+
+The contrib `remotetap` processor, v0.162.0 (unchanged on `main` as of October 2026). A goroutine dump of a stuck
+collector parks on exactly these lines.
+
+1. **Every batch waits for the tap.** `ConsumeLogs` doesn't return until `writeBytes` has handed the batch to every
+   client, so the receiver that sent it waits too.
+   [processor.go#L117-L127](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.162.0/processor/remotetapprocessor/processor.go#L117-L127)
+2. **Each client gets an unbuffered channel and no write deadline.** `handleConn` clears the deadline (line 70), makes
+   `ch := make(chan []byte)` (line 75), and loops on `conn.Write` (line 78), which blocks once the client's TCP buffers
+   are full.
+   [processor.go#L69-L84](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.162.0/processor/remotetapprocessor/processor.go#L69-L84)
+3. **A reader stops: the pipeline stalls.** `writeBytes` takes the read lock (line 36) and sends to each client's
+   channel in turn (line 38). The stuck client's goroutine never takes the message, so every batch waits at line 38.
+   It recovers if the reader starts reading again.
+   [channelset.go#L35-L41](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.162.0/processor/remotetapprocessor/channelset.go#L35-L41)
+4. **The reader disconnects: the tap deadlocks.** `conn.Write` fails and the handler calls `closeAndRemove`, which
+   needs the write lock (line 46). That waits for the read locks held at line 38, which wait for a channel only this
+   handler would read. Go's `RWMutex` blocks new readers once a writer waits, so later batches park at line 36. Only a
+   restart clears it.
+   [channelset.go#L45-L50](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.162.0/processor/remotetapprocessor/channelset.go#L45-L50)
+
+A fix would give each client a buffered channel and send to it without waiting (`select` with a `default` that drops),
+plus a write deadline on the connection.
+
+## The pattern, interactively
+
+[`docs/index.html`](docs/index.html) is an interactive diagram of a gateway with a tap and a relay in front of it. Toggle
+between readers on the tap directly and readers through the relay, and stall one reader to see what happens. It ends
+with the walkthrough above. Open it in a browser, or serve the repo with GitHub Pages from `/docs`.

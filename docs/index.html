@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Telemetry Tap Relay</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@500;600;700&family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: a schematic sheet. Header, then the live diagram with its inspector beside it, then the rules and the build notes. */
+:root {
+  --bg: #eef1f3;
+  --sheet: #f8fafb;
+  --ink: #17232b;
+  --muted: #56656f;
+  --line: #c3ccd2;
+  --frame: #dfe5e9;
+  --signal: #c7791b;      /* telemetry in flight */
+  --tap: #13827a;         /* the tap and what it copies */
+  --stall: #c2412d;       /* blocked or dropped */
+  --chip: #e4e9ec;
+  --f-display: "Familjen Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --f-body: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #11181d; --sheet: #172128; --ink: #e3e9ec; --muted: #9aa8b0; --line: #3a4851; --frame: #22303a;
+    --signal: #e59a3c; --tap: #3cb8ad; --stall: #ec6a55; --chip: #24323b; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #11181d; --sheet: #172128; --ink: #e3e9ec; --muted: #9aa8b0; --line: #3a4851; --frame: #22303a;
+  --signal: #e59a3c; --tap: #3cb8ad; --stall: #ec6a55; --chip: #24323b; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink); font-family: var(--f-body); font-size: 16px; line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.wrap { max-width: 1240px; margin: 0 auto; padding-block: 36px 64px; display: grid; gap: 40px; }
+h1, h2, h3 { font-family: var(--f-display); text-wrap: balance; margin: 0; letter-spacing: -0.01em; }
+h1 { font-size: clamp(30px, 4.4vw, 46px); line-height: 1.08; font-weight: 700; }
+h2 { font-size: 24px; font-weight: 700; }
+h3 { font-size: 17px; font-weight: 600; }
+p { margin: 0; }
+.lede { max-width: 66ch; color: var(--muted); font-size: 17px; margin-top: 12px; }
+.eyebrow { font-family: var(--f-mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--tap); margin-bottom: 10px; }
+code, pre { font-family: var(--f-mono); font-size: 13px; font-variant-ligatures: none; }
+:not(pre) > code { background: var(--chip); padding: 1px 5px; border-radius: 4px; }
+
+/* Controls */
+.controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--sheet); }
+.seg button { font: 600 14px var(--f-body); color: var(--muted); background: none; border: 0; padding: 8px 14px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--sheet); }
+.toggle { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; user-select: none; }
+.toggle input { width: 18px; height: 18px; accent-color: var(--stall); }
+.btn { font: 600 14px var(--f-body); color: var(--ink); background: var(--sheet); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+button:focus-visible, .node:focus-visible, input:focus-visible { outline: 2px solid var(--tap); outline-offset: 2px; }
+
+/* Diagram + inspector */
+.stage { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 20px; align-items: start; }
+@media (max-width: 960px) { .stage { grid-template-columns: minmax(0, 1fr); } }
+.canvas { background: var(--sheet); border: 1px solid var(--line); border-radius: 10px; overflow-x: auto; }
+.canvas svg { display: block; width: 100%; min-width: 760px; height: auto; }
+.meters { display: flex; flex-wrap: wrap; gap: 8px 22px; padding: 12px 16px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); }
+.meters b { font-family: var(--f-mono); font-variant-numeric: tabular-nums; color: var(--ink); font-weight: 600; }
+.meters .bad b { color: var(--stall); }
+.status { font-weight: 700; color: var(--tap); }
+.status.bad { color: var(--stall); }
+
+.inspector { background: var(--sheet); border: 1px solid var(--line); border-radius: 10px; padding: 20px; display: grid; gap: 12px; min-width: 0; }
+.inspector .kind { font-family: var(--f-mono); font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.inspector ul { margin: 0; padding-left: 18px; display: grid; gap: 6px; }
+.inspector .hint { font-size: 13px; color: var(--muted); }
+
+/* SVG */
+.frame { fill: var(--frame); stroke: var(--line); }
+.frame-label { font: 600 12px var(--f-mono); fill: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
+.node rect { fill: var(--sheet); stroke: var(--line); stroke-width: 1.2; transition: stroke 0.15s; }
+.node { cursor: pointer; }
+.node:hover rect, .node.sel rect { stroke: var(--ink); stroke-width: 2; }
+.node text { font: 600 13px var(--f-body); fill: var(--ink); pointer-events: none; }
+.node .sub { font: 400 11px var(--f-mono); fill: var(--muted); }
+.node.tap rect { stroke: var(--tap); stroke-width: 2; }
+.node.stalled rect { stroke: var(--stall); stroke-width: 2.4; }
+.wire { fill: none; stroke: var(--line); stroke-width: 1.6; }
+.wire.tapwire { stroke: var(--tap); stroke-dasharray: 5 4; }
+.dim { opacity: 0.22; transition: opacity 0.3s; }
+.pkt { stroke: none; }
+.buf rect.slot { fill: var(--chip); stroke: var(--line); }
+.buf rect.full { fill: var(--stall); }
+.buf rect.used { fill: var(--tap); }
+.drop { font: 600 11px var(--f-mono); fill: var(--stall); }
+
+/* Below the fold */
+.rules { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+.rule { border-top: 2px solid var(--ink); padding-top: 12px; display: grid; gap: 6px; }
+.rule p { color: var(--muted); font-size: 15px; }
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+.card { background: var(--sheet); border: 1px solid var(--line); border-radius: 10px; padding: 18px; display: grid; gap: 10px; min-width: 0; }
+pre { margin: 0; background: var(--chip); border-radius: 6px; padding: 12px; overflow-x: auto; line-height: 1.5; }
+.limits { display: grid; gap: 10px; max-width: 78ch; }
+.limits li { color: var(--muted); }
+.limits li strong { color: var(--ink); }
+footer { font-size: 13px; color: var(--muted); }
+.trace { display: grid; gap: 16px; }
+.step { display: grid; grid-template-columns: 34px minmax(0,1fr); gap: 12px; align-items: start; }
+.step .n { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; background: var(--chip); }
+.step.bad .n { background: var(--stall); color: #fff; }
+.step h3 { margin: 2px 0 6px; }
+.step p { margin: 0 0 8px; color: var(--muted); max-width: 78ch; }
+.step pre .hl { background: color-mix(in srgb, var(--stall) 28%, transparent); display: inline-block; width: 100%; }
+.src { font-family: var(--f-mono); font-size: 12.5px; }
+.src a { color: inherit; }
+@media (prefers-reduced-motion: reduce) { .dim { transition: none; } }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">OpenTelemetry pattern</div>
+    <h1>Watching telemetry live without putting the pipeline at risk</h1>
+    <p class="lede">Every signal leaves the cluster through one gateway collector. A tap on that gateway copies a sample of what passes through. A small relay is the tap's only client, and it gives any number of people and programs their own filtered live stream. Use the controls to see why the relay is there: stall one reader with and without it.</p>
+  </header>
+
+  <section aria-label="Interactive diagram">
+    <div class="controls">
+      <div class="seg" role="group" aria-label="How readers connect">
+        <button type="button" id="mode-direct" aria-pressed="false">Readers on the tap directly</button>
+        <button type="button" id="mode-relay" aria-pressed="true">Readers through the relay</button>
+      </div>
+      <label class="toggle"><input type="checkbox" id="stall"> Stall the slow reader</label>
+      <button type="button" class="btn" id="pause">Pause</button>
+    </div>
+    <div style="height:14px"></div>
+    <div class="stage">
+      <div class="canvas">
+        <svg id="dia" viewBox="0 0 1120 520" role="img" aria-label="Diagram: nodes with apps and log files send to node agents, which send to a gateway collector. The gateway exports to two backends and has a tap that a relay reads and fans out to four readers.">
+          <g id="frames"></g>
+          <g id="wires"></g>
+          <g id="nodes"></g>
+          <g id="pkts"></g>
+          <g id="overlay"></g>
+        </svg>
+        <div class="meters" aria-live="polite">
+          <span>Pipeline <span id="m-status" class="status">flowing</span></span>
+          <span>Stored in backends <b id="m-stored">0</b></span>
+          <span id="m-wait-wrap">Waiting at the tap <b id="m-wait">0</b></span>
+          <span>Copies from the tap <b id="m-tapped">0</b></span>
+          <span id="m-drop-wrap">Dropped for the slow reader <b id="m-drop">0</b></span>
+        </div>
+      </div>
+      <aside class="inspector" id="insp" aria-live="polite"></aside>
+    </div>
+  </section>
+
+  <section style="display:grid;gap:18px">
+    <h2>The rules behind it</h2>
+    <div class="rules">
+      <div class="rule"><h3>One way out</h3><p>Apps send to the collector on their own node. Node agents send to the gateway. Only the gateway talks to backends, so routing, auth and fan-out live in one place.</p></div>
+      <div class="rule"><h3>Tee, don't branch</h3><p>The tap passes every batch through untouched and copies a rate-limited sample to the side. Backends get everything, whether anyone is watching or not.</p></div>
+      <div class="rule"><h3>One client on the tap</h3><p>The tap waits on each client it has. One reader that stops reading holds up the whole pipeline, and if it then disconnects the tap deadlocks until the collector restarts. So exactly one thing connects to it: the relay, which always reads promptly.</p></div>
+      <div class="rule"><h3>Isolate every reader</h3><p>The relay gives each reader its own filter and its own bounded buffer. A reader that falls behind loses its own messages and is told how many. Nobody else notices.</p></div>
+      <div class="rule"><h3>Guard the edge</h3><p>Every log in the system passes through here. Readers need a token, the tap port never leaves the collectors' network, and only the relay is exposed.</p></div>
+    </div>
+  </section>
+
+  <section class="cols">
+    <div class="card">
+      <h3>Gateway: add the tap</h3>
+      <p class="hint" style="color:var(--muted);font-size:14px">Contrib collector, <code>remotetap</code> processor. Put it after enrichment and before batching, so each copy is one sender's request.</p>
+<pre>processors:
+  remotetap:
+    endpoint: 0.0.0.0:12001   # reachable only from the relay
+    limit: 5                  # messages/sec, shared by all clients
+
+service:
+  pipelines:
+    logs:
+      receivers:  [otlp]
+      processors: [memory_limiter, resource, remotetap, batch]
+      exporters:  [otlp/backend_a, otlp/backend_b]</pre>
+    </div>
+    <div class="card">
+      <h3>Relay: what readers call</h3>
+      <p class="hint" style="color:var(--muted);font-size:14px">About 250 lines with no dependencies: a WebSocket client upstream, plain HTTP streams downstream.</p>
+<pre>GET /stream/logs?service=checkout&amp;severity=warn
+GET /stream/logs?resource.team=payments
+GET /stream/logs?format=otlp      # raw OTLP batches
+GET /stream/traces | /stream/metrics
+Authorization: Bearer &lt;token&gt;
+
+→ NDJSON, one record per line
+  (Accept: text/event-stream for browsers)
+→ {"relay":"dropped","count":N}
+  when this reader fell behind</pre>
+    </div>
+  </section>
+
+  <section style="display:grid;gap:18px" id="code">
+    <h2>Where the stall lives in the code</h2>
+    <p style="margin:0;color:var(--muted);max-width:78ch">The <code>remotetap</code> processor in opentelemetry-collector-contrib v0.162.0, unchanged on <code>main</code> as of October 2026. Each line number links to the source. A goroutine dump of a stuck collector shows goroutines parked on exactly the highlighted lines.</p>
+    <div class="trace">
+      <div class="step"><div class="n">1</div><div>
+        <h3>Every batch waits for the tap</h3>
+        <p>The pipeline calls <code>ConsumeLogs</code> for each batch, and it doesn't return until <code>writeBytes</code> has handed the batch to every client. The receiver that sent the batch waits the whole time. <span class="src"><a href="https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.162.0/processor/remotetapprocessor/processor.go#L117-L127">processor.go:117–127</a></span></p>
+<pre>func (w *wsprocessor) ConsumeLogs(_ context.Context, ld plog.Logs) (plog.Logs, error) {
+	if w.limiter.Allow() {
+		b, err := logMarshaler.MarshalLogs(ld)
+		...
+<span class="hl">			w.cs.writeBytes(b)</span>
+	}
+	return ld, nil
+}</pre>
+      </div></div>
+      <div class="step"><div class="n">2</div><div>
+        <h3>Each client gets an unbuffered channel, and no write deadline</h3>
+        <p>A client's channel holds nothing, so a send on it waits until that client's goroutine takes the message. The connection's deadline is cleared, so <code>conn.Write</code> can wait forever on a reader that stopped reading. <span class="src"><a href="https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.162.0/processor/remotetapprocessor/processor.go#L69-L84">processor.go:69–84</a></span></p>
+<pre>func (w *wsprocessor) handleConn(conn *websocket.Conn) {
+<span class="hl">	err := conn.SetDeadline(time.Time{})   // no deadline</span>
+	...
+<span class="hl">	ch := make(chan []byte)                 // unbuffered</span>
+	idx := w.cs.add(ch)
+	for bytes := range ch {
+<span class="hl">		_, err := conn.Write(bytes)          // blocks when the client's TCP buffers are full</span>
+		if err != nil {
+			w.cs.closeAndRemove(idx)
+			break
+		}
+	}
+}</pre>
+      </div></div>
+      <div class="step bad"><div class="n">3</div><div>
+        <h3>A reader stops: the pipeline stalls</h3>
+        <p>Its goroutine is stuck in <code>conn.Write</code> and stops taking from its channel. <code>writeBytes</code> holds the read lock and waits on that channel at line 38, and so does every batch after it. The pipeline is stuck as long as the reader is. If it starts reading again, everything flows again. <span class="src"><a href="https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.162.0/processor/remotetapprocessor/channelset.go#L35-L41">channelset.go:35–41</a></span></p>
+<pre>func (c *channelSet) writeBytes(bytes []byte) {
+	c.mu.RLock()
+	for _, ch := range c.chanmap {
+<span class="hl">		ch &lt;- bytes      // line 38: waits for every client, one by one</span>
+	}
+	c.mu.RUnlock()
+}</pre>
+      </div></div>
+      <div class="step bad"><div class="n">4</div><div>
+        <h3>The reader disconnects: the tap deadlocks</h3>
+        <p><code>conn.Write</code> finally fails, and the handler calls <code>closeAndRemove</code>, which needs the write lock (line 46). That waits for the read locks held at line 38, which wait for a channel that only this handler would read. Neither side can move. Go's <code>RWMutex</code> also stops new readers once a writer is waiting, so every later batch parks at line 36. Only a restart clears it. <span class="src"><a href="https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.162.0/processor/remotetapprocessor/channelset.go#L45-L50">channelset.go:45–50</a></span></p>
+<pre>func (c *channelSet) closeAndRemove(key int) {
+<span class="hl">	c.mu.Lock()        // line 46: waits for writeBytes, which waits for this client</span>
+	close(c.chanmap[key])
+	delete(c.chanmap, key)
+	c.mu.Unlock()
+}</pre>
+      </div></div>
+    </div>
+    <p style="margin:0;color:var(--muted);max-width:78ch">What a dump of a deadlocked collector looks like: several goroutines at <code>channelset.go:36</code> (new batches), a few at <code>:38</code> (batches holding the read lock), and one at <code>:46</code> (the disconnected client). A fix would give each client a buffered channel and send to it without waiting, dropping messages for a client that falls behind. That is what the relay does, one level up.</p>
+  </section>
+
+  <section style="display:grid;gap:14px">
+    <h2>Limits to know before you adopt it</h2>
+    <ul class="limits">
+      <li><strong>It's a sample.</strong> The tap passes a fixed number of messages a second, shared by everyone. Use it to watch things happen. For "show me everything about this request", query the backend.</li>
+      <li><strong>The relay is a single instance.</strong> Each replica would hold its own tap connection and split the rate limit, so run one. It holds no state, and readers reconnect if it restarts.</li>
+      <li><strong>Never print to stdout to debug.</strong> A debug exporter on the gateway writes every record to the gateway's own log. The node agents collect that log and send it back, and the records loop and multiply. The tap writes to a socket instead, so it can't loop.</li>
+      <li><strong>Filters run in the relay, not the gateway.</strong> The gateway does no extra work per reader. The relay parses each sampled batch once and checks it against each reader's filter.</li>
+    </ul>
+  </section>
+
+  <footer>Built on the OpenTelemetry Collector (contrib) remote tap processor. The diagram's traffic is simulated; rates are slowed down so the movement is visible.</footer>
+</div>
+
+<script>
+(() => {
+  const NS = 'http://www.w3.org/2000/svg';
+  const $ = (id) => document.getElementById(id);
+  const svg = $('dia');
+  const el = (tag, attrs, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent && parent.appendChild(e); return e; };
+
+  // ---------- Components (geometry + explanation) ----------
+  const N = {
+    a1: { x: 24, y: 70, w: 150, h: 46, t: 'Service', s: 'OTel SDK → OTLP', kind: 'Source', g: 'node',
+      d: 'An application instrumented with an OpenTelemetry SDK. It sends traces, logs and metrics over OTLP to the agent on its own node, never straight to the gateway.',
+      pts: ['Endpoint: the node-local agent (a node-local Service or the host IP)', 'No backend credentials in the app'] },
+    a2: { x: 24, y: 150, w: 150, h: 46, t: 'Container logs', s: 'stdout → files', kind: 'Source', g: 'node',
+      d: 'Apps that only print to stdout. The container runtime writes those lines to files on the node, and the agent tails them.',
+      pts: ['Nothing to change in the app', 'Parsed for JSON fields, severity and trace ids'] },
+    b1: { x: 24, y: 310, w: 150, h: 46, t: 'Service', s: 'OTel SDK → OTLP', kind: 'Source', g: 'node', ref: 'a1' },
+    b2: { x: 24, y: 390, w: 150, h: 46, t: 'Container logs', s: 'stdout → files', kind: 'Source', g: 'node', ref: 'a2' },
+    ag1: { x: 206, y: 113, w: 140, h: 56, t: 'Node agent', s: 'collector, per node', kind: 'Collector (DaemonSet)', g: 'agent',
+      d: 'A collector on every node. It enriches each record with where it came from (namespace, pod, node, service name) and buffers to disk, so a gateway outage or restart loses nothing.',
+      pts: ['Receives OTLP from local apps and tails local log files', 'Adds resource attributes once, close to the source', 'Persistent queue: backpressure lands here, not in apps', 'Excludes its own logs, so it never collects itself'] },
+    ag2: { x: 206, y: 353, w: 140, h: 56, t: 'Node agent', s: 'collector, per node', kind: 'Collector (DaemonSet)', g: 'agent', ref: 'ag1' },
+    rx: { x: 410, y: 80, w: 250, h: 40, t: 'OTLP receiver', s: 'gRPC 4317 · HTTP 4318', kind: 'Gateway stage', g: 'gw',
+      d: 'The gateway\'s only input. It accepts OTLP from the node agents, and from senders outside the cluster through an authenticated ingress.',
+      pts: ['A network policy admits only the agents and the ingress', 'Outside senders authenticate at the ingress'] },
+    ml: { x: 410, y: 140, w: 250, h: 40, t: 'memory_limiter', s: 'refuse before OOM', kind: 'Gateway stage', g: 'gw',
+      d: 'Refuses data when memory runs high, instead of being killed. Refused data stays queued on the agents and is retried.',
+      pts: ['Pairs with the agents\' disk queues', 'Each backend has its own export queue, so one slow backend can\'t fill memory for the other'] },
+    rs: { x: 410, y: 200, w: 250, h: 40, t: 'resource', s: 'cluster name, defaults', kind: 'Gateway stage', g: 'gw',
+      d: 'Stamps attributes every record should carry, such as the cluster name, when the sender didn\'t set them.',
+      pts: ['Runs before the tap, so readers see the final shape'] },
+    tap: { x: 410, y: 260, w: 250, h: 40, t: 'remote tap', s: 'tee → WebSocket :12001', kind: 'Gateway stage · the tap', g: 'gw', tap: true,
+      d: 'Passes every batch on unchanged and copies a rate-limited sample to the WebSocket clients connected to it. With no clients connected it costs almost nothing.',
+      pts: ['limit = messages per second, shared by all clients', 'Hands each copy to every client in turn and waits until each takes it', 'So a client that stops reading holds up the pipeline', 'If that client then drops, the tap deadlocks: the pipeline stays stuck until the collector restarts (reproduced on contrib 0.162)', 'That is why only the relay connects here'] },
+    bt: { x: 410, y: 320, w: 250, h: 40, t: 'batch', s: 'fewer, larger exports', kind: 'Gateway stage', g: 'gw',
+      d: 'Groups records into larger batches before export. It sits after the tap, so the tap sees each sender\'s request as it arrived, not a merged mega-batch.',
+      pts: [] },
+    ex: { x: 410, y: 380, w: 250, h: 40, t: 'exporters', s: 'one queue per backend', kind: 'Gateway stage', g: 'gw',
+      d: 'Sends every batch to each backend over its own queue and retry loop. A backend that is down fills and drops its own queue without holding back the other.',
+      pts: ['Size each queue to what you can afford to lose', 'Adding a backend means adding one exporter'] },
+    be1: { x: 740, y: 62, w: 160, h: 50, t: 'Backend A', s: 'store + search', kind: 'Backend', g: 'be',
+      d: 'Where telemetry is stored and queried. History, dashboards and alerts live here. The tap is for watching live; this is for looking back.',
+      pts: [] },
+    be2: { x: 740, y: 140, w: 160, h: 50, t: 'Backend B', s: 'second vendor', kind: 'Backend', g: 'be',
+      d: 'A second backend gets the same data from its own exporter. Useful for evaluating a vendor or for redundancy, at no cost to the first.',
+      pts: [] },
+    rl: { x: 740, y: 300, w: 160, h: 74, t: 'Tap relay', s: 'filters · buffers · auth', kind: 'Relay (single instance)', g: 'relay',
+      d: 'The tap\'s only client. It reads the WebSocket as fast as copies arrive, then gives each reader its own stream with its own filter and its own bounded send buffer.',
+      pts: ['Readers: NDJSON over HTTP, or Server-Sent Events for browsers', 'Filters: service, namespace, pod, severity, body text, any resource attribute', 'Buffer full → skip and count, never wait', 'Bearer tokens; the only part exposed beyond the collectors\' network', 'Reconnects to the tap with backoff'] },
+    r1: { x: 958, y: 220, w: 150, h: 46, t: 'Engineer', s: 'curl | jq', kind: 'Reader', g: 'reader', filt: (p) => p.svc === 0,
+      d: 'Someone at a terminal following one service. Filter: service=checkout.',
+      pts: ['curl -sN -H "Authorization: Bearer …" …/stream/logs?service=checkout | jq'] },
+    r2: { x: 958, y: 285, w: 150, h: 46, t: 'Web console', s: 'EventSource (SSE)', kind: 'Reader', g: 'reader', filt: () => true,
+      d: 'A browser page holding a live tail. It connects to its own server, which holds the token, rather than to the relay directly. No filter: it sees the whole sample.',
+      pts: [] },
+    r3: { x: 958, y: 350, w: 150, h: 46, t: 'Agent / service', s: 'severity ≥ WARN', kind: 'Reader', g: 'reader', filt: (p) => p.warn,
+      d: 'A program reacting to what it sees, such as an assistant following one job by a resource attribute, or a watcher for warnings.',
+      pts: ['resource.<key>=<value> follows one job or request across services'] },
+    r4: { x: 958, y: 415, w: 150, h: 46, t: 'Slow reader', s: 'stalled pipe', kind: 'Reader', g: 'reader', slow: true, filt: () => true,
+      d: 'A client that stopped reading, such as a paused terminal, a frozen laptop or a hung connection. With the relay, only its own stream suffers. Directly on the tap, it stops everything.',
+      pts: ['Turn on "Stall the slow reader" to see the difference'] },
+  };
+  for (const k in N) { N[k].id = k; if (N[k].ref) Object.assign(N[k], { d: N[N[k].ref].d, pts: N[N[k].ref].pts }, { t: N[k].t }); }
+  const R = (n) => [n.x + n.w, n.y + n.h / 2], L = (n) => [n.x, n.y + n.h / 2], C = (n) => [n.x + n.w / 2, n.y + n.h / 2];
+
+  // ---------- Frames ----------
+  const F = $('frames');
+  [[10, 40, 350, 200, 'Node 1'], [10, 280, 350, 200, 'Node 2'], [390, 34, 290, 412, 'Gateway collector']].forEach(([x, y, w, h, t]) => {
+    el('rect', { x, y, width: w, height: h, rx: 10, class: 'frame' }, F);
+    el('text', { x: x + 12, y: y + 20, class: 'frame-label' }, F).textContent = t;
+  });
+  el('text', { x: 958, y: 208, class: 'frame-label' }, F).textContent = 'Live readers';
+
+  // ---------- Wires ----------
+  const W = $('wires');
+  const wire = (pts, cls = 'wire', id) => el('path', { d: 'M' + pts.map((p) => p.join(',')).join(' L'), class: cls, ...(id ? { id } : {}) }, W);
+  const trunk = (src, ag) => [R(src), [190, R(src)[1]], [190, L(ag)[1]], L(ag)];
+  for (const [s, a] of [['a1', 'ag1'], ['a2', 'ag1'], ['b1', 'ag2'], ['b2', 'ag2']]) wire(trunk(N[s], N[a]));
+  const agToRx = (a) => [R(N[a]), [372, R(N[a])[1]], [372, 100], L(N.rx)];
+  wire(agToRx('ag1')); wire(agToRx('ag2'));
+  for (const [a, b] of [['rx', 'ml'], ['ml', 'rs'], ['rs', 'tap'], ['tap', 'bt'], ['bt', 'ex']]) wire([[535, N[a].y + N[a].h], [535, N[b].y]]);
+  const exToBe = (b) => [R(N.ex), [710, 400], [710, C(N[b])[1]], L(N[b])];
+  wire(exToBe('be1')); wire(exToBe('be2'));
+  // tap → relay → readers
+  const tapToRelay = [R(N.tap), [705, 280], [705, 337], L(N.rl)];
+  const relayToReader = (r) => [R(N.rl), [930, 337], [930, C(N[r])[1]], L(N[r])];
+  const tapToReader = (r) => [R(N.tap), [925, 280], [925, C(N[r])[1]], L(N[r])];
+  const relayWires = [wire(tapToRelay, 'wire tapwire')];
+  for (const r of ['r1', 'r2', 'r3', 'r4']) relayWires.push(wire(relayToReader(r), 'wire tapwire'));
+  const directWires = ['r1', 'r2', 'r3', 'r4'].map((r) => wire(tapToReader(r), 'wire tapwire'));
+
+  // ---------- Nodes ----------
+  const G = $('nodes');
+  for (const k in N) {
+    const n = N[k];
+    const g = el('g', { class: 'node' + (n.tap ? ' tap' : ''), tabindex: 0, role: 'button', 'aria-label': n.t + ', ' + n.kind, 'data-id': k }, G);
+    el('rect', { x: n.x, y: n.y, width: n.w, height: n.h, rx: 7 }, g);
+    const cy = n.y + n.h / 2;
+    el('text', { x: n.x + 12, y: cy - 3 }, g).textContent = n.t;
+    el('text', { x: n.x + 12, y: cy + 13, class: 'sub' }, g).textContent = n.s;
+    n.g_el = g;
+    g.addEventListener('click', () => select(k));
+    g.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(k); } });
+  }
+  // slow reader's buffer gauge (4 slots) + drop label
+  const OV = $('overlay');
+  const buf = el('g', { class: 'buf' }, OV);
+  const slots = [0, 1, 2, 3].map((i) => el('rect', { x: 1062 + i * 11, y: 425, width: 8, height: 26, rx: 2, class: 'slot' }, buf));
+  const dropLbl = el('text', { x: 958, y: 478, class: 'drop' }, OV);
+
+  // ---------- Inspector ----------
+  let selected = 'tap';
+  function select(k) {
+    selected = k;
+    for (const id in N) N[id].g_el.classList.toggle('sel', id === k);
+    const n = N[k];
+    const I = $('insp');
+    I.innerHTML = '';
+    const kind = document.createElement('div'); kind.className = 'kind'; kind.textContent = n.kind; I.appendChild(kind);
+    const h = document.createElement('h3'); h.textContent = n.t; I.appendChild(h);
+    const p = document.createElement('p'); p.textContent = n.d; I.appendChild(p);
+    if (n.pts && n.pts.length) {
+      const ul = document.createElement('ul');
+      for (const t of n.pts) { const li = document.createElement('li'); li.textContent = t; ul.appendChild(li); }
+      I.appendChild(ul);
+    }
+    if (n.id === 'tap') { const a = document.createElement('a'); a.href = '#code'; a.textContent = 'See where this happens in the code ↓'; I.appendChild(a); }
+    const hint = document.createElement('p'); hint.className = 'hint'; hint.textContent = 'Select any box in the diagram to read about it.'; I.appendChild(hint);
+  }
+
+  // ---------- Simulation ----------
+  const P = $('pkts');
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const SVC_COLORS = ['var(--signal)', 'var(--tap)', 'var(--muted)'];
+  let mode = 'relay', stalled = false, paused = false;
+  let pkts = [], stored = 0, tapped = 0, dropped = 0;
+  let slowQueue = 0;           // messages waiting in the slow reader's buffer
+  const SLOW_CAP = 4;
+  let tapTokens = 1, waitAtTap = 0;
+
+  function polyLen(pts) { let s = 0; for (let i = 1; i < pts.length; i++) s += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]); return s; }
+  function at(pts, d) {
+    for (let i = 1; i < pts.length; i++) {
+      const seg = Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+      if (d <= seg) { const t = seg ? d / seg : 0; return [pts[i - 1][0] + (pts[i][0] - pts[i - 1][0]) * t, pts[i - 1][1] + (pts[i][1] - pts[i - 1][1]) * t]; }
+      d -= seg;
+    }
+    return pts[pts.length - 1];
+  }
+  function spawn(pts, color, r, onDone, opts = {}) {
+    const c = el('circle', { r, class: 'pkt', fill: color }, P);
+    const p = { pts, len: polyLen(pts), d: 0, c, onDone, speed: opts.speed || 240, holdAt: opts.holdAt, meta: opts.meta };
+    pkts.push(p);
+    return p;
+  }
+  const mainPath = (src, ag) => [...trunk(N[src], N[ag]), ...agToRx(ag).slice(1), C(N.rx), C(N.ml), C(N.rs), C(N.tap), C(N.bt), C(N.ex)];
+
+  function emit() {
+    const srcs = [['a1', 'ag1'], ['a2', 'ag1'], ['b1', 'ag2'], ['b2', 'ag2']];
+    const [s, a] = srcs[Math.floor(Math.random() * srcs.length)];
+    const meta = { svc: Math.floor(Math.random() * 3), warn: Math.random() < 0.3 };
+    const pts = mainPath(s, a);
+    // distance along the path where the tap sits
+    const tapIdx = pts.findIndex((q) => q[0] === C(N.tap)[0] && q[1] === C(N.tap)[1]);
+    const holdAt = polyLen(pts.slice(0, tapIdx + 1));
+    spawn(pts, SVC_COLORS[meta.svc], 5, () => {
+      for (const b of ['be1', 'be2']) spawn(exToBe(b), SVC_COLORS[meta.svc], 4, () => { stored++; });
+    }, { holdAt, meta });
+  }
+
+  // The tap's gate: in direct mode a full slow-reader buffer blocks the tap, which blocks the pipeline.
+  const tapBlocked = () => mode === 'direct' && stalled && slowQueue >= SLOW_CAP;
+
+  function atTap(p) {
+    // Rate limit: a token per 0.7 s of simulated time.
+    if (tapTokens < 1) return;
+    tapTokens -= 1; tapped++;
+    const meta = p.meta;
+    if (mode === 'relay') {
+      spawn(tapToRelay, 'var(--tap)', 4, () => {
+        for (const r of ['r1', 'r2', 'r3', 'r4']) {
+          if (!N[r].filt(meta)) continue;
+          if (N[r].slow && stalled && slowQueue >= SLOW_CAP) { dropped++; flashDrop(); continue; }
+          if (N[r].slow) slowQueue++;
+          spawn(relayToReader(r), 'var(--tap)', 3.5, () => {});
+        }
+      }, { speed: 260 });
+    } else {
+      for (const r of ['r1', 'r2', 'r3', 'r4']) {
+        if (N[r].slow) slowQueue++;
+        spawn(tapToReader(r), 'var(--tap)', 3.5, () => {}, { speed: 260 });
+      }
+    }
+  }
+
+  let dropFlash = 0;
+  function flashDrop() { dropFlash = 1.2; }
+
+  let last = performance.now(), emitAcc = 0, drainAcc = 0;
+  function tick(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    if (!paused) step(dt);
+    requestAnimationFrame(tick);
+  }
+  function step(dt) {
+    emitAcc += dt;
+    const every = 0.4;
+    while (emitAcc > every) { emitAcc -= every; if (waitAtTap < 30) emit(); }  // past that, the agents' queues hold the rest
+    tapTokens = Math.min(2, tapTokens + dt / 0.7);
+    // The slow reader drains its buffer quickly when healthy, never when stalled.
+    drainAcc += dt;
+    const drainEvery = stalled ? Infinity : 0.4;
+    while (drainAcc > drainEvery) { drainAcc -= drainEvery; if (slowQueue > 0) slowQueue--; }
+    if (stalled) drainAcc = 0;
+
+    const blocked = tapBlocked();
+    waitAtTap = 0;
+    const done = [];
+    for (const p of pkts) {
+      let next = p.d + p.speed * dt;
+      if (p.holdAt != null && p.d <= p.holdAt && next >= p.holdAt) {
+        if (blocked) { next = p.holdAt; waitAtTap++; }
+        else { atTap(p); p.holdAt = null; }
+      }
+      p.d = next;
+      const [x, y] = at(p.pts, p.d);
+      p.c.setAttribute('cx', x.toFixed(1)); p.c.setAttribute('cy', y.toFixed(1));
+      if (p.d >= p.len) done.push(p);
+    }
+    for (const p of done) { p.c.remove(); pkts.splice(pkts.indexOf(p), 1); p.onDone && p.onDone(); }
+    render(blocked);
+  }
+
+  function render(blocked) {
+    for (let i = 0; i < SLOW_CAP; i++) slots[i].setAttribute('class', 'slot' + (i < slowQueue ? (slowQueue >= SLOW_CAP ? ' full' : ' used') : ''));
+    N.tap.g_el.classList.toggle('stalled', blocked);
+    N.r4.g_el.classList.toggle('stalled', stalled);
+    N.rl.g_el.classList.toggle('dim', mode !== 'relay');
+    relayWires.forEach((w) => w.classList.toggle('dim', mode !== 'relay'));
+    directWires.forEach((w) => w.classList.toggle('dim', mode === 'relay'));
+    if (dropFlash > 0) { dropFlash -= 0.016; dropLbl.textContent = 'buffer full: skipped, counted'; } else dropLbl.textContent = '';
+    $('m-status').textContent = blocked ? 'stalled by one reader' : 'flowing';
+    $('m-status').classList.toggle('bad', blocked);
+    $('m-stored').textContent = stored;
+    $('m-wait').textContent = blocked ? waitAtTap : 0;
+    $('m-wait-wrap').classList.toggle('bad', blocked);
+    $('m-tapped').textContent = tapped;
+    $('m-drop').textContent = dropped;
+    $('m-drop-wrap').classList.toggle('bad', dropped > 0 && mode === 'relay');
+  }
+
+  // ---------- Controls ----------
+  function setMode(m) {
+    mode = m;
+    $('mode-direct').setAttribute('aria-pressed', String(m === 'direct'));
+    $('mode-relay').setAttribute('aria-pressed', String(m === 'relay'));
+    slowQueue = Math.min(slowQueue, SLOW_CAP);
+  }
+  $('mode-direct').addEventListener('click', () => setMode('direct'));
+  $('mode-relay').addEventListener('click', () => setMode('relay'));
+  $('stall').addEventListener('change', (e) => { stalled = e.target.checked; if (!stalled) slowQueue = 0; select(stalled ? (mode === 'relay' ? 'rl' : 'tap') : selected); });
+  $('pause').addEventListener('click', () => { paused = !paused; $('pause').textContent = paused ? 'Play' : 'Pause'; });
+
+  select('tap');
+  setMode('relay');
+  if (reduce) { paused = true; $('pause').textContent = 'Play'; for (let i = 0; i < 160; i++) step(0.05); }
+  requestAnimationFrame((t) => { last = t; tick(t); });
+})();
+</script>
+</body>
+</html>
